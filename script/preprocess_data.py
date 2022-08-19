@@ -1,14 +1,105 @@
 import pandas as pd
 import os, re
 import numpy as np
+from sklearn.model_selection import StratifiedKFold
 
 from my_util import *
 
-data_root_dir = '../datasets/original/'
-save_dir = "../datasets/preprocessed_data/"
+
 
 char_to_remove = ['+','-','*','/','=','++','--','\\','<str>','<char>','|','&','!']
+class MyDataset:
+    def __init__(self,all_releases:dict,args):
+    
+        self.all_releases=all_releases
+        self.data_dir=args.data_dir
+        self.test_size=args.test_size
+        self.file_lvl_dir = os.path.join(self.data_dir,'File-level')
+        self.line_lvl_dir = os.path.join(self.data_dir,'Line-level')
+    def preprocess_data(self,proj_name):
+        cur_all_rel = self.all_releases[proj_name]
+        result={}
+        for rel in cur_all_rel:
+            result[rel]=self.get_rel_data(rel)            
+        return result
+    def get_cp_file_data_split(self):
+        train_list=[]
+        eval_list=[]
+        test_list=[]        
+        for proj_name in self.all_releases.keys():
+            train,eval,test=self.get_file_data_split(proj_name)
+            train_list.append(train)
+            eval_list.append(eval)
+            test_list.append(test)
+        train_set=pd.concat(train_list,ignore_index=True)
+        eval_set=pd.concat(eval_list,ignore_index=True)
+        test_set=pd.concat(test_list,ignore_index=True)
+        return train_set,eval_set,test_set
+    def get_file_data_split(self,proj_name):
+        cur_all_rel = self.all_releases[proj_name]
+        df_list=[]
+        for rel in cur_all_rel:
+            df=pd.read_csv(os.path.join(self.file_lvl_dir,rel+'_ground-truth-files_dataset.csv'), encoding='latin')
+            df['Project']=proj_name
+            df['Release']=rel
+            df['RelFilename']=df['Release']+'$'+df['File']
+            df_list.append(df)
+        all_data=pd.concat(df_list,ignore_index=True)
+        all_data['target']=all_data['Bug'].astype(int)
+        skf = StratifiedKFold(n_splits=5)
+        t=all_data.Bug
+        ids=[]
+        for train_index, test_index in skf.split(np.zeros(len(t)), t):
+            ids.append((train_index, test_index))
+        train_index, test_index=ids[0]
+        train_eval = all_data.loc[train_index].reset_index(drop=True)
+        test = all_data.loc[test_index].reset_index(drop=True)
+       
+        t=train_eval.Bug
+        ids=[]
+        for train_index, test_index in skf.split(np.zeros(len(t)), t):
+            ids.append((train_index, test_index))
+        train_index, test_index=ids[0]
+        train = train_eval.loc[train_index].reset_index(drop=True)
+        eval = train_eval.loc[test_index].reset_index(drop=True)
+        return train,eval,test
+    def get_rel_data(self,rel):
+        file_level_data = pd.read_csv(os.path.join(self.file_lvl_dir,rel+'_ground-truth-files_dataset.csv'), encoding='latin')
+        line_level_data = pd.read_csv(os.path.join(self.line_lvl_dir,rel+'_defective_lines_dataset.csv'), encoding='latin')        
+        buggy_files = list(line_level_data['File'].unique())
 
+        preprocessed_df_list = []
+
+        for idx, row in file_level_data.iterrows():
+            
+            filename = row['File']
+
+            if '.java' not in filename:
+                continue
+
+            code = row['SRC']
+            label = row['Bug']
+
+            code_df = create_code_df(code, filename)
+            code_df['file-label'] = [label]*len(code_df)
+            code_df['line-label'] = [False]*len(code_df)
+
+            if filename in buggy_files:
+                buggy_lines = list(line_level_data[line_level_data['File']==filename]['Line_number'])
+                code_df['line-label'] = code_df['line_number'].isin(buggy_lines)
+
+            if len(code_df) > 0:
+                preprocessed_df_list.append(code_df)
+
+        return pd.concat(preprocessed_df_list)
+    def get_dataset(self):
+        for proj in list(self.all_releases.keys()):
+            self.preprocess_data(proj)
+
+
+
+data_root_dir = '../datasets/original/'
+save_dir = "../datasets/preprocessed_data/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
@@ -160,7 +251,8 @@ def preprocess_data(proj_name):
         all_df = pd.concat(preprocessed_df_list)
         all_df.to_csv(save_dir+rel+".csv",index=False)
         print('finish release {}'.format(rel))
+if __name__ == "__main__":
 
-for proj in list(all_releases.keys()):
-    preprocess_data(proj)
+    for proj in list(all_releases.keys()):
+        preprocess_data(proj)
 

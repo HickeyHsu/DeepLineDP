@@ -1,9 +1,19 @@
 import re
+import sys
 
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
-
+from transformers import T5Tokenizer
+class InputFeatures(object):
+    """A single training/test features for a example."""
+    def __init__(self,
+                 input_tokens,
+                 input_ids,
+                 label):
+        self.input_tokens = input_tokens
+        self.input_ids = input_ids
+        self.label=label
 max_seq_len = 50
 
 all_train_releases = {'activemq': 'activemq-5.0.0', 'camel': 'camel-1.4.0', 'derby': 'derby-10.2.1.6', 
@@ -154,3 +164,43 @@ def get_x_vec(code_3d, word2vec):
          for text in texts] for texts in code_3d]
     
     return x_vec
+
+def get_x_vec_sa(code_3d, tokenizer:T5Tokenizer,block_size):
+    x_vec = [[convert_examples_to_features(text,tokenizer,block_size)
+         for text in texts] for texts in code_3d]
+    
+    return x_vec
+
+def convert_examples_to_features(func, label, tokenizer, args)->InputFeatures:
+    """ 
+    源代码encode：将源代码进行分词、映射、对齐，转换为InputFeatures对象保存
+    <s>:1,</s>:2,<pad>:3
+    """    
+    #source：BPE分词
+    code_tokens = tokenizer.tokenize(str(func))[:args.block_size-2]#block_size-2:保留<s>和</s>的位置
+    source_tokens = [tokenizer.cls_token] + code_tokens + [tokenizer.sep_token]# <s> + code + </s>
+    try:
+        source_ids = tokenizer.convert_tokens_to_ids(source_tokens)# 将tokens转化成单词表中单个字的id，得到id列表
+    except:
+        print(source_tokens)
+        sys.exit()
+    padding_length = args.block_size - len(source_ids)
+    source_ids += [tokenizer.pad_token_id] * padding_length#不同长度编码向量对齐
+    return InputFeatures(source_tokens, source_ids, label)#转换为对象保存
+
+def sort_code_by_file(df):
+    '''
+        input
+            df (DataFrame): a dataframe from get_df()
+        output
+            code3d (nested list): a list of code2d from prepare_code2d()
+            all_file_label (list): a list of file-level label
+    '''
+    code3d = []
+    all_file_label = []
+    for filename, group_df in df.groupby('RelFilename'):
+        file_label = bool(group_df['Bug'].unique())
+        code = list(group_df['SRC'])
+        code3d.append(code)
+        all_file_label.append(file_label)
+    return code3d, all_file_label
