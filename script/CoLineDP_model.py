@@ -22,16 +22,15 @@ class CoHierarchicalAttentionNetwork(nn.Module):
         """
         super(CoHierarchicalAttentionNetwork, self).__init__()
 
-        # self.sent_attention = SentenceAttention(encoder,
-        #     vocab_size, embed_dim, word_gru_hidden_dim, sent_gru_hidden_dim,
-        #     word_gru_num_layers, sent_gru_num_layers, word_att_dim, sent_att_dim, use_layer_norm, dropout)
-
+        self.sent_attention = SentenceAttention(t5model, args.word_gru_hidden_dim, args.sent_gru_hidden_dim,
+                args.sent_gru_num_layers, args.sent_att_dim, args.use_layer_norm, args.dropout)
+        self.encoder:T5ForConditionalGeneration = t5model#编码器
         self.fc = nn.Linear(2 * args.sent_gru_hidden_dim, 1)
         self.sig = nn.Sigmoid()
 
         # self.use_layer_nome = use_layer_norm
         # self.dropout = dropout
-        self.encoder:T5ForConditionalGeneration = t5model#编码器
+        
         # self.tokenizer = tokenizer#
     def forward(self, input_embed=None, labels=None, output_attentions=False, input_ids=None,max_sent_len=None):
         
@@ -42,15 +41,14 @@ class CoHierarchicalAttentionNetwork(nn.Module):
             code_line = []
             code_lengths.append(len(file))#[900,900,900,900]
             code_line=[self.args.block_size]*max_sent_len#[96,96,...,96,96](900)
-            sent_lengths.append(code_line)
-        print(sent_lengths)
-        sys.exit()
+            sent_lengths.append(code_line)#[96,96,...,96,96]
+
         
         code_tensor = code_tensor.type(torch.LongTensor)
         code_lengths = torch.tensor(code_lengths).type(torch.LongTensor).cuda()
         sent_lengths = torch.tensor(sent_lengths).type(torch.LongTensor).cuda()
         
-        code_embeds, word_att_weights, sent_att_weights, sents = self.sent_attention(code_tensor, code_lengths, sent_lengths)
+        code_embeds, word_att_weights, sent_att_weights, sents = self.sent_attention(code_tensor, code_lengths, sent_lengths,output_attentions)
 
         scores = self.fc(code_embeds)
         final_scrs = self.sig(scores)
@@ -61,13 +59,11 @@ class SentenceAttention(nn.Module):
     """
     Sentence-level attention module. Contains a word-level attention module.
     """
-    def __init__(self, encoder, vocab_size, embed_dim, word_gru_hidden_dim, sent_gru_hidden_dim,
-                word_gru_num_layers, sent_gru_num_layers, word_att_dim, sent_att_dim, use_layer_norm, dropout):
+    def __init__(self, encoder, word_gru_hidden_dim, sent_gru_hidden_dim,
+                sent_gru_num_layers, sent_att_dim, use_layer_norm, dropout):
         super(SentenceAttention, self).__init__()
-
         # Word-level attention module
-        self.word_attention = WordAttention(encoder,vocab_size, embed_dim, word_gru_hidden_dim, word_gru_num_layers, word_att_dim, use_layer_norm, dropout)
-
+        self.encoder=encoder
         # Bidirectional sentence-level GRU
         self.gru = nn.GRU(2 * word_gru_hidden_dim, sent_gru_hidden_dim, num_layers=sent_gru_num_layers,
                           batch_first=True, bidirectional=True, dropout=dropout)
@@ -84,10 +80,9 @@ class SentenceAttention(nn.Module):
         # This is equivalent to taking that dot product (Eq.10 in the paper),
         # as u_s is the linear layer's 1D parameter vector here
         self.sentence_context_vector = nn.Linear(sent_att_dim, 1, bias=False)
+    def forward(self, code_tensor, code_lengths, sent_lengths,output_attentions):
 
-    def forward(self, code_tensor, code_lengths, sent_lengths):
-
-        # Sort code_tensor by decreasing order in length
+        # Sort code_tensor by decreasing order in length 不知道必要性在哪？
         code_lengths, code_perm_idx = code_lengths.sort(dim=0, descending=True)
         code_tensor = code_tensor[code_perm_idx]
         sent_lengths = sent_lengths[code_perm_idx]
@@ -96,23 +91,40 @@ class SentenceAttention(nn.Module):
         # i.e. `code_tensor` was of size (num_code_tensor, padded_code_lengths, padded_sent_length)
         # -> `packed_sents.data` is now of size (num_sents, padded_sent_length)
         packed_sents = pack_padded_sequence(code_tensor, lengths=code_lengths.tolist(), batch_first=True)
-
+        last_hidden_state_list=[]
+        attentions_list=[]
+        for file in code_tensor:
+            for input_ids in file:
+                outputs = self.encoder.encoder(input_ids, attention_mask=input_ids.ne(0), output_attentions=output_attentions)
+                attentions=outputs.attentions
+                attentions = attentions[0][0]
+                attention = None
+                # go into the layer
+                for i in range(len(attentions)):
+                    layer_attention = attentions[i]
+                    # summerize the values of each token dot other tokens
+                    layer_attention = sum(layer_attention)
+                    if attention is None:
+                        attention = layer_attention
+                    else:
+                        attention += layer_attention
+                attention = clean_special_token_values(attention, padding=True)
+                attentions_list.append(attention)#注意力
+                # 上游的最后一层结果输入到下游分类器
+                last_hidden_state_list.append(outputs.last_hidden_state)
         # effective batch size at each timestep
         valid_bsz = packed_sents.batch_sizes
 
         # Make a long batch of sentence lengths by removing pad-sentences
         # i.e. `sent_lengths` was of size (num_code_tensor, padded_code_lengths)
         # -> `packed_sent_lengths.data` is now of size (num_sents)
-        packed_sent_lengths = pack_padded_sequence(sent_lengths, lengths=code_lengths.tolist(), batch_first=True)
+        # packed_sent_lengths = pack_padded_sequence(sent_lengths, lengths=code_lengths.tolist(), batch_first=True)
 
     
     
         # Word attention module
-        sents, word_att_weights = self.word_attention(packed_sents.data, packed_sent_lengths.data)
-
-        sents = self.dropout(sents)
-
         # Sentence-level GRU over sentence embeddings
+        sents=torch.tensor(last_hidden_state_list)
         packed_sents, _ = self.gru(PackedSequence(sents, valid_bsz))
 
         if self.use_layer_norm:
@@ -140,6 +152,7 @@ class SentenceAttention(nn.Module):
         code_tensor = code_tensor.sum(dim=1)
 
         # Restore as documents by repadding
+        word_att_weights=torch.tensor(attention)
         word_att_weights, _ = pad_packed_sequence(PackedSequence(word_att_weights, valid_bsz), batch_first=True)
 
         # Restore the original order of documents (undo the first sorting)
@@ -150,106 +163,6 @@ class SentenceAttention(nn.Module):
         sent_att_weights = sent_att_weights[code_tensor_unperm_idx]
 
         return code_tensor, word_att_weights, sent_att_weights, sents
-
-
-class WordAttention(nn.Module):
-    """
-    Word-level attention module.
-    """
-
-    def __init__(self, encoder, embed_dim, gru_hidden_dim, gru_num_layers, att_dim, use_layer_norm, dropout):
-        super(WordAttention, self).__init__()
-        self.embeddings = encoder
-        # output (batch, hidden_size)
-        self.gru = nn.GRU(embed_dim, gru_hidden_dim, num_layers=gru_num_layers, batch_first=True, bidirectional=True, dropout=dropout)
-        self.encoder=encoder
-        self.use_layer_norm = use_layer_norm
-        if use_layer_norm:
-            self.layer_norm = nn.LayerNorm(2 * gru_hidden_dim, elementwise_affine=True)
-        self.dropout = nn.Dropout(dropout)
-
-        # Maps gru output to `att_dim` sized tensor
-        self.attention = nn.Linear(2 * gru_hidden_dim, att_dim)
-
-        # Word context vector (u_w) to take dot-product with
-        self.context_vector = nn.Linear(att_dim, 1, bias=False)
-
-    def init_embeddings(self, embeddings):
-        """
-        Initialized embedding layer with pretrained embeddings.
-        embeddings: embeddings to init with
-        """
-        self.embeddings.weight = nn.Parameter(embeddings)
-
-    def freeze_embeddings(self, freeze=False):
-        """
-        Set whether to freeze pretrained embeddings.
-        """
-        self.embeddings.weight.requires_grad = freeze
-
-    def forward(self, sents, sent_lengths):
-        """
-        sents: encoded sentence-level data; LongTensor (num_sents, pad_len, embed_dim)
-        return: sentence embeddings, attention weights of words
-        """
-        # Sort sents by decreasing order in sentence lengths
-        sent_lengths, sent_perm_idx = sent_lengths.sort(dim=0, descending=True)
-        sents = sents[sent_perm_idx]
-
-        sents,attentions = self.embeddings(sents.cuda(),attention_mask=sents.cuda().ne(0), output_attentions=True)
-
-        packed_words = pack_padded_sequence(sents, lengths=sent_lengths.tolist(), batch_first=True)
-
-        # effective batch size at each timestep
-        valid_bsz = packed_words.batch_sizes
-
-        # Apply word-level GRU over word embeddings
-        
-        packed_words, _ = self.gru(packed_words)
-
-        if self.use_layer_norm:
-            normed_words = self.layer_norm(packed_words.data)
-        else:
-            normed_words = packed_words
-
-        # Word Attenton
-        
-
-        # Restore as sentences by repadding
-        att, _ = pad_packed_sequence(PackedSequence(att, valid_bsz), batch_first=True)
-
-        att_weights = att / torch.sum(att, dim=1, keepdim=True)
-
-        # Restore as sentences by repadding
-        sents, _ = pad_packed_sequence(packed_words, batch_first=True)
-
-        # Compute sentence vectors
-        sents = sents * att_weights.unsqueeze(2)
-        sents = sents.sum(dim=1)
-
-        # Restore the original order of sentences (undo the first sorting)
-        _, sent_unperm_idx = sent_perm_idx.sort(dim=0, descending=False)
-        sents = sents[sent_unperm_idx]
-
-        att_weights = att_weights[sent_unperm_idx]
-
-        return sents, att_weights
-def get_att(attentions):
-    attentions = attentions[0][0]
-    attention = None
-    # go into the layer
-    for i in range(len(attentions)):
-        layer_attention = attentions[i]
-        # summerize the values of each token dot other tokens
-        layer_attention = sum(layer_attention)
-        if attention is None:
-            attention = layer_attention
-        else:
-            attention += layer_attention
-    # clean att score for <s> and </s>
-    attention = clean_special_token_values(attention, padding=True)
-    # attention should be 1D tensor with seq length representing each token's attention value
-    word_att_scores = get_word_att_scores(all_tokens=all_tokens, att_scores=attention)
 
 def clean_special_token_values(all_values, padding=False):
     # special token in the beginning of the seq 
@@ -262,10 +175,3 @@ def clean_special_token_values(all_values, padding=False):
         # special token in the end of the seq 
         all_values[-1] = 0
     return all_values
-
-def get_word_att_scores(all_tokens: list, att_scores: list) -> list:
-    word_att_scores = []
-    for i in range(len(all_tokens)):
-        token, att_score = all_tokens[i], att_scores[i]
-        word_att_scores.append([token, att_score])
-    return word_att_scores

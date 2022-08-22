@@ -113,28 +113,36 @@ def gen_dataloader(tokenizer, args, data:pd.DataFrame,shuffle=True,max_train_LOC
     tensor_dataset = TensorDataset(x_tensor, y_tensor)
     dl = DataLoader(tensor_dataset,shuffle=shuffle,batch_size=args.train_batch_size,drop_last=True)    
     return dl,max_sent_len
-# def get_loss_weight(labels):
-#     '''
-#         input
-#             labels: a PyTorch tensor that contains labels
-#         output
-#             weight_tensor: a PyTorch tensor that contains weight of defect/clean class
-#     '''
-#     label_list = labels.cpu().numpy().squeeze().tolist()
-#     weight_list = []
 
-#     for lab in label_list:
-#         if lab == 0:
-#             weight_list.append(weight_dict['clean'])
-#         else:
-#             weight_list.append(weight_dict['defect'])
+def get_loss_weight(labels,weight_dict):
+    '''
+        input
+            labels: a PyTorch tensor that contains labels
+        output
+            weight_tensor: a PyTorch tensor that contains weight of defect/clean class
+    '''
+    label_list = labels.cpu().numpy().squeeze().tolist()
+    weight_list = []
 
-#     weight_tensor = torch.tensor(weight_list).reshape(-1,1).cuda()
-#     return weight_tensor
+    for lab in label_list:
+        if lab == 0:
+            weight_list.append(weight_dict['clean'])
+        else:
+            weight_list.append(weight_dict['defect'])
+
+    weight_tensor = torch.tensor(weight_list).reshape(-1,1).cuda()
+    return weight_tensor
 
 def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
+    weight_dict = {}
+    train_label=train_dataset["target"].tolist()
+    sample_weights = compute_class_weight(class_weight = 'balanced', classes = np.unique(train_label), y = train_label)
+
+    weight_dict['defect'] = np.max(sample_weights)
+    weight_dict['clean'] = np.min(sample_weights)
     # build dataloader 数据加载
     train_dataloader,max_sent_len=gen_dataloader(tokenizer,args,train_dataset)
+    vali_dataloader,max_sent_len=gen_dataloader(tokenizer,args,train_dataset,max_sent_len=max_sent_len)
     logger.info("train data loaded")
     args.max_steps = args.epochs * len(train_dataloader)#最长训练步数=epoch数*数据批数
     logger.info(f"max_steps ={args.max_steps}")
@@ -144,7 +152,7 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
     logger.info(f"save_steps ={args.save_steps}")
     args.warmup_steps = args.max_steps // 5 #前20%为预热学习，学习率慢慢增加；后80%学习率逐渐衰减
     logger.info(f"warmup_steps ={args.warmup_steps}")
-    model=CoHierarchicalAttentionNetwork(t5model,tokenizer)
+    model=CoHierarchicalAttentionNetwork(t5model,tokenizer,args)
     model.to(args.device)
     criterion = nn.BCELoss()
     no_decay = ['bias', 'LayerNorm.weight']
@@ -156,17 +164,79 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
                                                 num_training_steps=args.max_steps)
-
+    train_loss_all_epochs = []
+    val_loss_all_epochs = []
     for idx in range(args.epochs): #对于每个epoch
+        train_losses = []
+        val_losses = []
         bar = tqdm(train_dataloader,total=len(train_dataloader))
-        print()
         tr_num = 0
         train_loss = 0#初始化训练损失
         for step, batch in enumerate(bar):#对于每个batch
             (inputs_ids, labels) = [x.to(args.device) for x in batch]#读取数据
             model.train()#切换到训练模式：即启用batch normalization和dropout，保证BN层能够用到每一批数据的均值和方差
-            loss, logits = model(input_ids=inputs_ids, labels=labels,max_sent_len=max_sent_len)#输入，其中inputs_ids是将token转为词表id后的结果；
-    
+            final_scrs, word_att_weights, sent_att_weights, sents = model(input_ids=inputs_ids, labels=labels,max_sent_len=max_sent_len)#输入，其中inputs_ids是将token转为词表id后的结果；
+            weight_tensor = get_loss_weight(labels,weight_dict)
+            criterion.weight = weight_tensor
+
+            loss = criterion(final_scrs, labels.reshape(args.batch_size,1))
+
+            train_losses.append(loss.item())
+            
+            torch.cuda.empty_cache()
+
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            
+            optimizer.step()
+
+            torch.cuda.empty_cache()
+        bar.set_description("epoch {} loss {}".format(idx,np.mean(train_losses)))
+        train_loss_all_epochs.append(np.mean(train_losses))
+        optimizer.step()#更新所有参数
+        optimizer.zero_grad()#梯度归零
+        scheduler.step()
+        with torch.no_grad():
+            
+            criterion.weight = None
+            model.eval()
+            bar_vali = tqdm(vali_dataloader,total=len(vali_dataloader))
+            for step, batch in enumerate(bar):#对于每个batch
+
+                (inputs_ids, labels) = [x.to(args.device) for x in batch]#读取数据
+                output, _, __, ___ = model(input_ids=inputs_ids, labels=labels,max_sent_len=max_sent_len)
+            
+                val_loss = criterion(output, labels.reshape(args.batch_size,1))
+
+                val_losses.append(val_loss.item())
+
+            val_loss_all_epochs.append(np.mean(val_losses))
+
+            logger.info('- at epoch:',str(idx))
+            actual_save_model_dir = os.path.join(args.save_dir,args.dataset)
+            if not os.path.exists(actual_save_model_dir):
+                os.makedirs(actual_save_model_dir)
+            if args.exp_name == '':
+                torch.save({
+                            'epoch': idx,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict()
+                            }, 
+                            actual_save_model_dir+'checkpoint_'+str(idx)+'epochs.pth')
+            else:
+                torch.save({
+                            'epoch': idx,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict()
+                            }, 
+                            actual_save_model_dir+'checkpoint_'+args.exp_name+'_'+str(idx)+'epochs.pth')
+
+        loss_df = pd.DataFrame()
+        loss_df['epoch'] = np.arange(1,len(train_loss_all_epochs)+1)
+        loss_df['train_loss'] = train_loss_all_epochs
+        loss_df['valid_loss'] = val_loss_all_epochs
+        
+        loss_df.to_csv(os.path.join(actual_save_model_dir,args.dataset+'-loss_record.csv'),index=False)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -181,6 +251,8 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.2, help='dropout rate')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--exp_name',type=str,default='')
+    parser.add_argument("--output_dir", default=None, type=str, required=False,
+                        help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--block_size", default=-1, type=int,
                         help="Optional input sequence length after tokenization."
                              "The training dataset will be truncated in block of this size for training."
@@ -225,7 +297,7 @@ def main():
                         help="Weight deay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                         help="Epsilon for Adam optimizer.")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float,
+    parser.add_argument("--max_grad_norm", default=5.0, type=float,
                         help="Max gradient norm.")
     parser.add_argument("--max_steps", default=-1, type=int,
                         help="If > 0: set total number of training steps to perform. Override num_train_epochs.")
