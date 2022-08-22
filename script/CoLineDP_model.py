@@ -22,8 +22,8 @@ class CoHierarchicalAttentionNetwork(nn.Module):
         """
         super(CoHierarchicalAttentionNetwork, self).__init__()
 
-        self.sent_attention = SentenceAttention(t5model, args.word_gru_hidden_dim, args.sent_gru_hidden_dim,
-                args.sent_gru_num_layers, args.sent_att_dim, args.use_layer_norm, args.dropout)
+        self.sent_attention = SentenceAttention(t5model, args.sent_gru_hidden_dim,
+                args.sent_gru_num_layers, args.sent_gru_hidden_dim, False, args.dropout)
         self.encoder:T5ForConditionalGeneration = t5model#编码器
         self.fc = nn.Linear(2 * args.sent_gru_hidden_dim, 1)
         self.sig = nn.Sigmoid()
@@ -59,13 +59,13 @@ class SentenceAttention(nn.Module):
     """
     Sentence-level attention module. Contains a word-level attention module.
     """
-    def __init__(self, encoder, word_gru_hidden_dim, sent_gru_hidden_dim,
+    def __init__(self, encoder, sent_gru_hidden_dim,
                 sent_gru_num_layers, sent_att_dim, use_layer_norm, dropout):
         super(SentenceAttention, self).__init__()
         # Word-level attention module
         self.encoder=encoder
         # Bidirectional sentence-level GRU
-        self.gru = nn.GRU(2 * word_gru_hidden_dim, sent_gru_hidden_dim, num_layers=sent_gru_num_layers,
+        self.gru = nn.GRU(2 * encoder.model_dim, sent_gru_hidden_dim, num_layers=sent_gru_num_layers,
                           batch_first=True, bidirectional=True, dropout=dropout)
 
         self.use_layer_norm = use_layer_norm

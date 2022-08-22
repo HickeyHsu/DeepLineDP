@@ -95,7 +95,7 @@ def gen_dataloader(tokenizer, args, data:pd.DataFrame,shuffle=True,max_train_LOC
         # x_vecs.append([file.input_ids])
     x_vecs=[file.input_ids for file in examples]
     max_ids_list=[max([len(sentx) for sentx in filex]) for filex in x_vecs]
-    logger.info(f"*** max_ids_list = {max_ids_list} ***")
+    # logger.info(f"*** max_ids_list = {max_ids_list} ***")
     max_ids=max(max_ids_list)
     logger.info(f"*** max_ids = {max_ids} ***")
     logger.info(f"{len(x_vecs)},{len(labels)}")
@@ -134,6 +134,18 @@ def get_loss_weight(labels,weight_dict):
     return weight_tensor
 
 def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
+    model=CoHierarchicalAttentionNetwork(t5model,tokenizer,args)
+    model.to(args.device)
+    criterion = nn.BCELoss()
+    no_decay = ['bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
+                                                num_training_steps=args.max_steps)
     weight_dict = {}
     train_label=train_dataset["target"].tolist()
     sample_weights = compute_class_weight(class_weight = 'balanced', classes = np.unique(train_label), y = train_label)
@@ -152,18 +164,8 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
     logger.info(f"save_steps ={args.save_steps}")
     args.warmup_steps = args.max_steps // 5 #前20%为预热学习，学习率慢慢增加；后80%学习率逐渐衰减
     logger.info(f"warmup_steps ={args.warmup_steps}")
-    model=CoHierarchicalAttentionNetwork(t5model,tokenizer,args)
-    model.to(args.device)
-    criterion = nn.BCELoss()
-    no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay},
-        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-    ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
-                                                num_training_steps=args.max_steps)
+    
+    
     train_loss_all_epochs = []
     val_loss_all_epochs = []
     for idx in range(args.epochs): #对于每个epoch
@@ -213,7 +215,7 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
             val_loss_all_epochs.append(np.mean(val_losses))
 
             logger.info('- at epoch:',str(idx))
-            actual_save_model_dir = os.path.join(args.save_dir,args.dataset)
+            actual_save_model_dir = os.path.join(args.output_dir,args.dataset)
             if not os.path.exists(actual_save_model_dir):
                 os.makedirs(actual_save_model_dir)
             if args.exp_name == '':

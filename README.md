@@ -1,8 +1,10 @@
 
 # Supplementary Materials for "DeepLineDP: Towards a Deep Learning Approach for Line-Level Defect Prediction"
 ## t5ver
-python t5lineDP_main.py --tokenizer_name=D:\model\Salesforce\codet5-base   --model_name_or_path=D:\model\Salesforce\codet5-base  --do_train  --block_size 128  --data_dir=D:\data_sci\line-level-defect-prediction\Dataset
-
+### win
+python t5lineDP_main.py --tokenizer_name=D:\model\Salesforce\codet5-base   --model_name_or_path=D:\model\Salesforce\codet5-base  --do_train  --block_size 96  --data_dir=D:\data_sci\line-level-defect-prediction\Dataset
+### ubuntu
+python t5lineDP_main.py --tokenizer_name=/home/hickey/pretrained/Salesforce/codet5-base   --model_name_or_path=/home/hickey/pretrained/Salesforce/codet5-base  --do_train  --block_size 96  --data_dir=/home/hickey/data/line-level-defect-prediction/Dataset --output_dir=/home/hickey/python-workspace/DeepLineDP/output
 
 ## Datasets
 
