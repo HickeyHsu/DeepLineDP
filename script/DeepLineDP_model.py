@@ -37,9 +37,9 @@ class HierarchicalAttentionNetwork(nn.Module):
 
         for file in code_tensor:
             code_line = []
-            code_lengths.append(len(file))
+            code_lengths.append(len(file))#[file1_sents_num,...,file4_sents_num]
             for line in file:
-                code_line.append(len(line))
+                code_line.append(len(line))#[line1_ids_num,...,line4_ids_num]
             sent_lengths.append(code_line)
         
         code_tensor = code_tensor.type(torch.LongTensor)

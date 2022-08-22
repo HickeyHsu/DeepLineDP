@@ -1,3 +1,4 @@
+import sys
 import torch.nn as nn
 import torch
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, PackedSequence
@@ -6,7 +7,7 @@ from transformers import RobertaForSequenceClassification, T5ForConditionalGener
 
 # Model structure
 class CoHierarchicalAttentionNetwork(nn.Module):
-    def __init__(self, encoder, vocab_size, embed_dim, word_gru_hidden_dim, sent_gru_hidden_dim, word_gru_num_layers, sent_gru_num_layers, word_att_dim, sent_att_dim, use_layer_norm, dropout):
+    def __init__(self, t5model, tokenizer, args):
         """
         vocab_size: number of words in the vocabulary of the model
         embed_dim: dimension of word embeddings
@@ -21,28 +22,29 @@ class CoHierarchicalAttentionNetwork(nn.Module):
         """
         super(CoHierarchicalAttentionNetwork, self).__init__()
 
-        self.sent_attention = SentenceAttention(encoder,
-            vocab_size, embed_dim, word_gru_hidden_dim, sent_gru_hidden_dim,
-            word_gru_num_layers, sent_gru_num_layers, word_att_dim, sent_att_dim, use_layer_norm, dropout)
+        # self.sent_attention = SentenceAttention(encoder,
+        #     vocab_size, embed_dim, word_gru_hidden_dim, sent_gru_hidden_dim,
+        #     word_gru_num_layers, sent_gru_num_layers, word_att_dim, sent_att_dim, use_layer_norm, dropout)
 
-        self.fc = nn.Linear(2 * sent_gru_hidden_dim, 1)
+        self.fc = nn.Linear(2 * args.sent_gru_hidden_dim, 1)
         self.sig = nn.Sigmoid()
 
-        self.use_layer_nome = use_layer_norm
-        self.dropout = dropout
-        self.encoder:T5ForConditionalGeneration = encoder#编码器
+        # self.use_layer_nome = use_layer_norm
+        # self.dropout = dropout
+        self.encoder:T5ForConditionalGeneration = t5model#编码器
         # self.tokenizer = tokenizer#
-    def forward(self, code_tensor):
+    def forward(self, input_embed=None, labels=None, output_attentions=False, input_ids=None,max_sent_len=None):
         
         code_lengths = []
         sent_lengths = []
 
-        for file in code_tensor:
+        for file in input_ids:
             code_line = []
-            code_lengths.append(len(file))
-            for line in file:
-                code_line.append(len(line))
+            code_lengths.append(len(file))#[900,900,900,900]
+            code_line=[self.args.block_size]*max_sent_len#[96,96,...,96,96](900)
             sent_lengths.append(code_line)
+        print(sent_lengths)
+        sys.exit()
         
         code_tensor = code_tensor.type(torch.LongTensor)
         code_lengths = torch.tensor(code_lengths).type(torch.LongTensor).cuda()

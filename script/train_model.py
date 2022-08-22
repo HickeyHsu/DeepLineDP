@@ -182,7 +182,7 @@ def train_model(dataset_name):
 
         model.train()
 
-        for inputs, labels in train_dl:
+        for inputs, labels in train_dl:#一个batch
 
             inputs_cuda, labels_cuda = inputs.cuda(), labels.cuda()
             output, _, __, ___ = model(inputs_cuda)

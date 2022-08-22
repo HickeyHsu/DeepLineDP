@@ -127,7 +127,7 @@ def get_w2v_weight_for_deep_learning_models(word2vec_model, embed_dim):
     return word2vec_weights
 
 def pad_code(code_list_3d,max_sent_len,limit_sent_len=True, mode='train'):
-    paded = []
+    paded = []# paded[file1=[sent1=[line1,line2,],sent2,...],file2,...]
     
     for file in code_list_3d:
         sent_list = []
@@ -166,8 +166,13 @@ def get_x_vec(code_3d, word2vec):
     return x_vec
 
 def get_x_vec_sa(code_3d, tokenizer:T5Tokenizer,block_size):
-    x_vec = [[convert_examples_to_features(text,tokenizer,block_size)
-         for text in texts] for texts in code_3d]
+    x_vec = [
+                [
+                    convert_examples_to_features(text,tokenizer,block_size)
+                    for text in texts#每个text是一个句子
+                ] 
+                for texts in code_3d#每个texts是一个文件
+            ]
     
     return x_vec
 
@@ -186,6 +191,28 @@ def convert_examples_to_features(func, label, tokenizer, args)->InputFeatures:
         sys.exit()
     padding_length = args.block_size - len(source_ids)
     source_ids += [tokenizer.pad_token_id] * padding_length#不同长度编码向量对齐
+    return InputFeatures(source_tokens, source_ids, label)#转换为对象保存
+def convert_files_to_features(code_lines, label, tokenizer, args)->InputFeatures:
+    """ 
+    源代码encode：将源代码进行分词、映射、对齐，转换为InputFeatures对象保存
+    <s>:1,</s>:2,<pad>:3
+    """
+    #source：BPE分词
+    source_tokens=[]
+    source_ids=[]
+    for code_line in code_lines:
+        code_tokens = tokenizer.tokenize(str(code_line))[:args.block_size-2]#block_size-2:保留<s>和</s>的位置
+        line_source_tokens = [tokenizer.cls_token] + code_tokens + [tokenizer.sep_token]# <s> + code + </s>
+        source_tokens.append(line_source_tokens)
+        try:
+            line_source_ids = tokenizer.convert_tokens_to_ids(line_source_tokens)# 将tokens转化成单词表中单个字的id，得到id列表
+        except:
+            print(line_source_tokens)
+            sys.exit()
+        padding_length = args.block_size - len(line_source_ids)
+        line_source_ids += [tokenizer.pad_token_id] * padding_length#不同长度编码向量对齐
+        source_ids.append(line_source_ids)
+
     return InputFeatures(source_tokens, source_ids, label)#转换为对象保存
 
 def sort_code_by_file(df):
