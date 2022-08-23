@@ -165,7 +165,8 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
     args.warmup_steps = args.max_steps // 5 #前20%为预热学习，学习率慢慢增加；后80%学习率逐渐衰减
     logger.info(f"warmup_steps ={args.warmup_steps}")
     
-    
+    tr_loss, logging_loss, avg_loss, tr_nb, tr_num, train_loss = 0.0, 0.0, 0.0, 0, 0, 0
+    best_f1=0
     train_loss_all_epochs = []
     val_loss_all_epochs = []
     for idx in range(args.epochs): #对于每个epoch
@@ -183,17 +184,16 @@ def train_model(args, train_dataset,t5model, tokenizer, eval_dataset):
 
             loss = criterion(final_scrs, labels.reshape(args.batch_size,1))
 
-            train_losses.append(loss.item())
-            
-            torch.cuda.empty_cache()
-
+            train_losses.append(loss.item())            
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            
-            optimizer.step()
-
-            torch.cuda.empty_cache()
-        bar.set_description("epoch {} loss {}".format(idx,np.mean(train_losses)))
+            tr_loss += loss.item()#总训练损失
+            tr_num += 1
+            train_loss += loss.item()#本epoch训练损失
+            if avg_loss == 0:
+                avg_loss = tr_loss
+            avg_loss = round(train_loss/tr_num,5)
+            bar.set_description("epoch {} loss {}".format(idx,np.mean(train_losses)))
         train_loss_all_epochs.append(np.mean(train_losses))
         optimizer.step()#更新所有参数
         optimizer.zero_grad()#梯度归零
